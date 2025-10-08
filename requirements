@@ -1,0 +1,12 @@
+# pip install
+numpy>=1.26
+scipy>=1.11
+nibabel>=5.2
+nilearn>=0.10
+
+# Fractal dimension toolkit (installed from GitHub)
+git+https://github.com/chiaramarzi/fractalbrain-toolkit@main
+
+# Setup (WSL + FSL + Python)
+This project is intended to run **on WSL (Windows Subsystem for Linux)**—tested on **Ubuntu 22.04**.  
+It requires **FSL** (BET/FLIRT/FNIRT/APPLYWARP/INVWARP) and the **fractalbrain-toolkit**.
