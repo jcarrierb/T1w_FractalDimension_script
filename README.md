@@ -4,11 +4,11 @@ Attempt to create a script based on the T1w_FractalDimension paper (https://gith
 
 
 
-## Step 0
+### Step 0
 
 Make sure all requirements are installed (see the requirements.txt file).
 
-## Step 1
+### Step 1
 
 Clone the repository:
 
@@ -17,11 +17,11 @@ git clone https://github.com/Radiology-Morrison-lab-UCSF/T1w_FractalDimension.gi
 Or download only the example file:
 ExamplePatient_T1w_brain.nii.gz
 
-## Step 2
+### Step 2
 
 Save the example file (ExamplePatient_T1w_brain.nii.gz) in the same folder as this script.
 
-## Step 3
+### Step 3
 
 Open a terminal, navigate to the root folder of this program, and run the following command (replace the paths with your own):
 
