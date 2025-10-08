@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+FSL-based pipeline with options to control FD while keeping surface=erode (1-voxel):
+T1 → fslreorient2std → BET → FLIRT(2mm) → FNIRT(config 2mm + refmask) → invwarp → applywarp(nn) AAL-90 MNI → native
+→ split AAL-90 (cortex-only) → exact ISO resample (configurable voxel size, default 1.0 mm) → LCC (26-connectivity; ON by default)
+→ SURFACE 1-voxel (erode) → fractalbrain (FD) → CSV.
+
+Notes to potentially increase FD while keeping erode(1):
+- use finer voxels (e.g., --voxel 0.8)
+- disable LCC (--no-lcc) to keep small islands
+"""
+
+import os
+import sys
+import argparse
+import subprocess
+import shutil
+import glob
+import numpy as np
+import nibabel as nib
+from nilearn import datasets, image as nlimage
+from scipy.ndimage import binary_erosion, label, generate_binary_structure
+
+
+# -----------------------
+# Utils
+# -----------------------
+def run(cmd, env=None, cwd=None):
+    print("[RUN]", " ".join(cmd))
+    subprocess.check_call(cmd, env=env, cwd=cwd)
+
+
+def check_fsl():
+    for exe in ["fslreorient2std", "bet", "flirt", "fnirt", "invwarp", "applywarp"]:
+        if shutil.which(exe) is None:
+            raise RuntimeError(f"[ERROR] FSL binary not found: {exe}. Check your PATH/FSL installation.")
+    if os.environ.get("FSLDIR") is None:
+        print("[WARN] FSLDIR env var not set. It's OK if FSL binaries are on PATH.")
+
+
+def save_nifti_like(img_nii, out_path):
+    nib.save(img_nii, out_path)
+
+
+def make_exact_iso(img_nii, iso_mm, out_path):
+    """Resample to EXACT iso_mm voxels (nearest)."""
+    A = img_nii.affine.copy()
+    U, _, Vt = np.linalg.svd(A[:3, :3])
+    R = U @ Vt
+    A[:3, :3] = R * iso_mm
+    res = nlimage.resample_img(img_nii, target_affine=A, interpolation="nearest")
+    data = (res.get_fdata() > 0.5).astype(np.uint8)
+    out_img = nib.Nifti1Image(data, res.affine, res.header)
+    out_img.header.set_zooms((iso_mm, iso_mm, iso_mm) + out_img.header.get_zooms()[3:])
+    nib.save(out_img, out_path)
+
+
+# -----------------------
+# AAL helpers
+# -----------------------
+def aal90_ids_from_nilearn_values_correct():
+    """
+    Keep AAL-90 labels:
+    - use nilearn's official LUT indices <-> labels
+    - drop Cerebellum* and Vermis* labels
+    - keep subcortical labels
+    """
+    atlas = datasets.fetch_atlas_aal(version="SPM12")
+    indices = list(map(int, atlas["indices"]))
+    labels = atlas["labels"]
+    lut = dict(zip(indices, labels))
+    keep = set()
+    for val, name in lut.items():
+        low = name.lower()
+        if ("cerebel" in low) or ("vermis" in low):
+            continue
+        keep.add(int(val))
+    return keep
+
+
+def explode_atlas_to_rois(atlas_path, out_dir, keep_ids=None):
+    os.makedirs(out_dir, exist_ok=True)
+    atlas = nib.load(atlas_path)
+    datai = np.rint(atlas.get_fdata()).astype(np.int32)
+    aff = atlas.affine
+    hdr = atlas.header
+    all_labels = np.unique(datai)
+    all_labels = all_labels[all_labels != 0]
+    labels = [int(l) for l in all_labels if (keep_ids is None or int(l) in keep_ids)]
+
+    print(f"[DBG] explode: raw_nonzero={len(all_labels)}, selected={len(labels)}")
+    if labels:
+        print("[DBG] sample kept IDs (first 10):", sorted(labels)[:10])
+
+    saved = 0
+    for rid in sorted(labels):
+        mask = (datai == rid).astype(np.uint8)
+        if mask.sum() == 0:
+            continue
+        out_path = os.path.join(out_dir, f"roi-{rid:04d}.nii.gz")
+        nib.save(nib.Nifti1Image(mask, aff, hdr), out_path)
+        saved += 1
+    return saved
+
+
+# -----------------------
+# ISO + LCC + SURFACE
+# -----------------------
+def keep_largest_cc_26(vol_bool: np.ndarray) -> np.ndarray:
+    """Keep the largest 26-connected component only."""
+    struct = generate_binary_structure(3, 3)  # 26c
+    lab, n = label(vol_bool, structure=struct)
+    if n <= 1:
+        return vol_bool
+    counts = np.bincount(lab.ravel())
+    counts[0] = 0  # background
+    k = counts.argmax()
+    return (lab == k)
+
+
+def resample_to_iso_like(nii_in_path, nii_out_path, iso=1.0, lcc_on=True):
+    """Resample to isotropic 'iso' mm (nearest); optionally keep only the largest 26c CC."""
+    img = nib.load(nii_in_path)
+    A = img.affine.copy()
+    U, _, Vt = np.linalg.svd(A[:3, :3])
+    R = U @ Vt
+    A[:3, :3] = R * float(iso)
+    out = nlimage.resample_img(img, target_affine=A, interpolation="nearest")
+    data = (out.get_fdata() > 0.5)
+
+    if lcc_on:
+        data = keep_largest_cc_26(data)
+
+    data = data.astype(np.uint8)
+    out_img = nib.Nifti1Image(data, out.affine, out.header)
+    out_img.header.set_zooms((iso, iso, iso) + out_img.header.get_zooms()[3:])
+    nib.save(out_img, nii_out_path)
+
+
+def make_surface_mask_erode1(nii_in_path, nii_out_path):
+    """
+    SURFACE 1-voxel (erode):
+    surface = vol & ~erosion(vol, iterations=1) with 26-connectivity.
+    """
+    nii = nib.load(nii_in_path)
+    vol = (nii.get_fdata() > 0)
+    if not np.any(vol):
+        nib.save(nib.Nifti1Image(vol.astype(np.uint8), nii.affine, nii.header), nii_out_path)
+        return
+    struct = np.ones((3, 3, 3), dtype=bool)  # 26c
+    er = binary_erosion(vol, structure=struct, iterations=1, border_value=0)
+    surf = vol & (~er)
+    if not np.any(surf):
+        surf = vol
+    nib.save(nib.Nifti1Image(surf.astype(np.uint8), nii.affine, nii.header), nii_out_path)
+
+
+# -----------------------
+# Main
+# -----------------------
+def parse_args():
+    ap = argparse.ArgumentParser(
+        description=(
+            "FSL + AAL (MNI→native NN) → cortex ROIs (AAL-90) → ISO (configurable voxel) → "
+            "LCC (26c, ON by default) → SURFACE erode(1) → FD."
+        )
+    )
+    ap.add_argument("--t1", required=True, help="Path to T1 NIfTI (.nii or .nii.gz)")
+    ap.add_argument("--out-root", required=True, help="Output directory (will be created)")
+    ap.add_argument("--subject", default="sub-Example", help="Subject prefix for outputs (default: sub-Example)")
+    ap.add_argument("--voxel", type=float, default=1.0, help="Isotropic voxel size (default 1.0 mm). Use <1.0 to increase FD.")
+    ap.add_argument("--run-fract", action="store_true", help="Run fractalbrain.fract + fract2table at the end")
+    ap.add_argument("--no-lcc", action="store_true", help="Disable LCC (keep small islands) → may increase FD")
+
+    return ap.parse_args()
+
+
+def main():
+    args = parse_args()
+    check_fsl()
+
+    t1_path = os.path.abspath(args.t1)
+    out_root = os.path.abspath(args.out_root)
+    subj = args.subject
+    os.makedirs(out_root, exist_ok=True)
+
+    work = os.path.join(out_root, "work_fsl")
+    os.makedirs(work, exist_ok=True)
+    rois_dir = os.path.join(out_root, "ROIs_native", subj)
+    os.makedirs(rois_dir, exist_ok=True)
+
+    # FSL env: write .nii.gz
+    env = os.environ.copy()
+    env["FSLOUTPUTTYPE"] = "NIFTI_GZ"
+
+    # 0) Reorient to standard
+    t1_std = os.path.join(work, "T1_std.nii.gz")
+    run(["fslreorient2std", t1_path, t1_std], env=env)
+
+    # 1) BET (brain extraction)
+    t1_brain = os.path.join(work, "T1_std_brain.nii.gz")
+    run(["bet", t1_std, t1_brain, "-R", "-f", "0.3", "-g", "0"], env=env)
+
+    # 2) FLIRT (affine T1_brain -> MNI152 2mm brain)
+    mni_brain_2mm = os.path.join(os.environ.get("FSLDIR", "/usr/share/fsl/6.0"),
+                                 "data", "standard", "MNI152_T1_2mm_brain.nii.gz")
+    t1_to_mni_mat = os.path.join(work, "T1_to_MNI_affine.mat")
+    t1_affine_to_mni = os.path.join(work, "T1_affine_to_MNI_2mm.nii.gz")
+    run([
+        "flirt", "-in", t1_brain, "-ref", mni_brain_2mm,
+        "-omat", t1_to_mni_mat, "-out", t1_affine_to_mni, "-dof", "12"
+    ], env=env)
+
+    # 3) FNIRT (non-linear) — input = T1 non-BET; ref = MNI 2mm; config 2mm + refmask 2mm
+    mni_head_2mm = os.path.join(os.environ.get("FSLDIR", "/usr/share/fsl/6.0"),
+                                "data", "standard", "MNI152_T1_2mm.nii.gz")
+    mni_mask_2mm = os.path.join(os.environ.get("FSLDIR", "/usr/share/fsl/6.0"),
+                                "data", "standard", "MNI152_T1_2mm_brain_mask_dil.nii.gz")
+    t1_nlin_to_mni = os.path.join(work, "T1_nlin_to_MNI_2mm.nii.gz")
+    t1_to_mni_warp = os.path.join(work, "T1_to_MNI_warp")
+    run([
+        "fnirt",
+        f"--in={t1_std}",
+        f"--aff={t1_to_mni_mat}",
+        f"--ref={mni_head_2mm}",
+        f"--refmask={mni_mask_2mm}",
+        f"--iout={t1_nlin_to_mni}",
+        f"--cout={t1_to_mni_warp}",
+        "--config=T1_2_MNI152_2mm"
+    ], env=env)
+
+    # 4) invwarp: generate inverse warp (MNI -> native)
+    mni_to_t1_warp_inv = os.path.join(work, "MNI_to_T1_warp_inv")
+    run([
+        "invwarp", "-w", t1_to_mni_warp, "-o", mni_to_t1_warp_inv, "-r", t1_std
+    ], env=env)
+
+    # 5) Fetch AAL (MNI) via nilearn; save NIfTI
+    print("[INFO] Fetching AAL SPM12 via nilearn (MNI)…")
+    aal = datasets.fetch_atlas_aal(version="SPM12")
+    aal_mni_src = aal["maps"]  # NIfTI MNI
+    aal_mni_path = os.path.join(work, "AAL_SPM12_MNI.nii.gz")
+    nib.save(nib.load(aal_mni_src), aal_mni_path)
+    print("[OK] AAL MNI:", aal_mni_path)
+
+    # 6) applywarp (MNI atlas -> native) with nearest-neighbor
+    aal_native = os.path.join(work, "AAL_native.nii.gz")
+    run([
+        "applywarp",
+        "-i", aal_mni_path,
+        "-r", t1_std,
+        "-w", mni_to_t1_warp_inv,
+        "--interp=nn",
+        "-o", aal_native
+    ], env=env)
+
+    # Sanity: any labels?
+    tmp = nib.load(aal_native)
+    vals = np.unique(np.rint(tmp.get_fdata()).astype(np.int32))
+    nz = vals[vals != 0]
+    print(f"[DBG] AAL_native unique labels (nonzero): n={len(nz)}, min..max=" +
+          (f"{nz.min()}..{nz.max()}" if len(nz) else "NA..NA"))
+    if len(nz) == 0:
+        raise RuntimeError("No non-zero labels after warp. Check registration and FSL references.")
+
+    # 6b) Diagnostics: present vs expected AAL-90
+    data_native = np.rint(nib.load(aal_native).get_fdata()).astype(np.int32)
+    present = set(int(v) for v in np.unique(data_native) if v != 0)
+    expected90 = aal90_ids_from_nilearn_values_correct()
+    missing = sorted(expected90 - present)
+    extra = sorted(present - expected90)
+    print(f"[DBG] Expected AAL-90 count: {len(expected90)} (~90)")
+    print(f"[DBG] Present after warp: {len(present)}")
+    print(f"[DBG] Intersection (explodable): {len(present & expected90)}")
+    if missing:
+        print("[WARN] Missing AAL-90 labels after warp:", missing[:20], "...")
+    if extra:
+        print("[INFO] Labels present but outside AAL-90 set:", extra[:20], "...")
+
+    # 7) Split into ROIs (AAL-90 cortex-only)
+    tmp_rois = os.path.join(work, "ROIs_tmp", subj)
+    os.makedirs(tmp_rois, exist_ok=True)
+    keep_ids = expected90
+    print("[DBG] expected (AAL-90):", len(keep_ids))
+    n_kept = explode_atlas_to_rois(aal_native, tmp_rois, keep_ids=keep_ids)
+    print(f"[INFO] AAL cortex ROIs (filtered by names) created: {n_kept}")
+
+    # 8) Prepare ROIs for FD — RESAMPLE iso(@--voxel) → (LCC ON by default) → SURFACE erode(1)
+    roi_files = sorted(glob.glob(os.path.join(tmp_rois, "roi-*.nii.gz")))
+    iso_dir = os.path.join(out_root, f"ROIs_iso{args.voxel:.1f}mm", subj)
+    os.makedirs(iso_dir, exist_ok=True)
+    surface_dir = os.path.join(out_root, "ROIs_surface", subj)
+    os.makedirs(surface_dir, exist_ok=True)
+
+    print(f"[INFO] Resample {args.voxel:.1f}mm iso (nearest) → "
+          f"{'LCC(26c) ON' if not args.no_lcc else 'LCC OFF (keep islands)'} → surface erode(1)…")
+
+    for f in roi_files:
+        f_iso = os.path.join(iso_dir, os.path.basename(f))
+        resample_to_iso_like(f, f_iso, iso=args.voxel, lcc_on=(not args.no_lcc))
+
+        f_surf = os.path.join(surface_dir, os.path.basename(f).replace(".nii.gz", "_surface.nii.gz"))
+        make_surface_mask_erode1(f_iso, f_surf)
+
+    final_rois_dir = surface_dir
+    print("[OK] ROIs 'surface@{:.1f}mm erode(1)' ready in: {}".format(args.voxel, final_rois_dir))
+
+    # 9) Lists for fractalbrain
+    prefixes_path = os.path.join(out_root, "prefixes_list.txt")
+    nifti_list = os.path.join(out_root, "NIfTI_list.txt")
+    with open(prefixes_path, "w", encoding="utf-8") as fp, open(nifti_list, "w", encoding="utf-8") as fi:
+        for f in sorted(glob.glob(os.path.join(final_rois_dir, "roi-*.nii.gz"))):
+            rid = os.path.splitext(os.path.basename(f))[0]
+            fp.write(f"{subj}_{rid}\n")
+            fi.write(os.path.abspath(f) + "\n")
+    print("[OK] Lists written:\n   ", prefixes_path, "\n   ", nifti_list)
+
+    # 10) fract + merge (optional)
+    if args.run_fract:
+        print("[INFO] Run fractalbrain.fract …")
+        run([sys.executable, "-m", "fractalbrain.fract", prefixes_path, nifti_list], cwd=out_root)
+        print("[INFO] Run fractalbrain.fract2table …")
+        run([sys.executable, "-m", "fractalbrain.fract2table", prefixes_path, nifti_list], cwd=out_root)
+        print("[OK] FD results CSV written to:", out_root)
+
+    print("\n[OK] Pipeline completed successfully.")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
