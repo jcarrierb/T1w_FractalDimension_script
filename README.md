@@ -6,6 +6,8 @@ Using the example dataset and the configuration above, the pipeline yields a Pea
 
 
 
+
+
 ### Step 0
 
 Make sure all requirements are installed (see the requirements.txt file).
@@ -33,3 +35,19 @@ python pipeline_examplepatient_aal_fd.py \
   --voxel 0.8 \
   --no-lcc \
   --run-fract
+
+
+
+
+
+
+### References
+
+T1w_FractalDimension — Original UCSF implementation of the fractal dimension analysis described in the paper:
+https://github.com/Radiology-Morrison-lab-UCSF/T1w_FractalDimension
+
+FractalBrain Toolkit — Python package for fractal analysis of 3D brain volumes:
+https://github.com/chiaramarzi/fractalbrain-toolkit
+
+FSL (FMRIB Software Library) — Suite of tools for MRI and brain image processing used in this pipeline (BET, FLIRT, FNIRT, etc.):
+https://fsl.fmrib.ox.ac.uk/fsl/fslwiki
