@@ -2,10 +2,11 @@
 Attempt to create a script based on the T1w_FractalDimension paper (https://github.com/Radiology-Morrison-lab-UCSF/T1w_FractalDimension) that calculates the fractal dimension of the provided example dataset.
 
 ### Result
-Using the example dataset and the configuration above, the pipeline yields a Pearson correlation coefficient of **r = 0.93** between this script’s FD values and the reference values from the [T1w_FractalDimension paper/repository](https://github.com/Radiology-Morrison-lab-UCSF/T1w_FractalDimension/blob/main/ExamplePatient_FractalDimension_ROIS.csv).
+Using the example dataset and the configuration above, the pipeline yields a Pearson correlation coefficient of **r = 0.44** between this script’s FD values and the reference values from the [T1w_FractalDimension paper/repository](https://github.com/Radiology-Morrison-lab-UCSF/T1w_FractalDimension/blob/main/ExamplePatient_FractalDimension_ROIS.csv).
 
+### Conclusion
 
-
+The Pearson correlation coefficient (R = 0.44) suggests a statistically significant but weak positive association between the variables. This indicates that while the relationship exists, it explains only a modest proportion of the variance. Further code adjustments are required to improve the confidence level of the findings.
 
 
 ### Step 0
