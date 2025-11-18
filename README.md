@@ -2,11 +2,11 @@
 Attempt to create a script based on the T1w_FractalDimension paper (https://github.com/Radiology-Morrison-lab-UCSF/T1w_FractalDimension) that calculates the fractal dimension of the provided example dataset.
 
 ### Result
-Using the example dataset and the configuration above, the pipeline yields a Pearson correlation coefficient of **R = 0.44** between this script’s FD values and the reference values from the [T1w_FractalDimension paper/repository](https://github.com/Radiology-Morrison-lab-UCSF/T1w_FractalDimension/blob/main/ExamplePatient_FractalDimension_ROIS.csv).
+Using the example dataset and the configuration above, the pipeline yields a Pearson correlation coefficient of **R = 0.45** between this script’s FD values and the reference values from the [T1w_FractalDimension paper/repository](https://github.com/Radiology-Morrison-lab-UCSF/T1w_FractalDimension/blob/main/ExamplePatient_FractalDimension_ROIS.csv).
 
 ### Conclusion
 
-The Pearson correlation coefficient (R = 0.44) suggests a statistically significant but weak positive association between the variables. This indicates that while the relationship exists, it explains only a modest proportion of the variance. Further code adjustments are required to improve the confidence level of the findings.
+The Pearson correlation coefficient (R = 0.45) suggests a statistically significant but weak positive association between the variables. This indicates that while the relationship exists, it explains only a modest proportion of the variance. Further code adjustments are required to improve the confidence level of the findings.
 
 
 ### Step 0
@@ -24,18 +24,14 @@ ExamplePatient_T1w_brain.nii.gz
 
 ### Step 2
 
-Save the example file (ExamplePatient_T1w_brain.nii.gz) in the same folder as this script.
+Save the example file (ExamplePatient_T1w_brain.nii.gz) in the same folder as those scripts.
 
 ### Step 3
 
-Open a terminal, navigate to the root folder of this program, and run the following command (replace the paths with your own):
+Open a terminal, navigate to the root folder of this program, and run the following command :
 
-python pipeline_examplepatient_aal_fd.py \
-  --t1 "/mnt/***your_path***/ExamplePatient_T1w_brain.nii.gz" \
-  --out-root "/mnt/***your_path***" \
-  --voxel 0.8 \
-  --no-lcc \
-  --run-fract
+WSL:
+bash pipeline_FD_AAL90.sh
 
 
 
